@@ -1,44 +1,36 @@
 # SubSidekick — Product Requirements
 
-## Overview
-Voice-first AI foreman mobile app for small subcontractors. Superintendents talk to an AI on their phone; the AI captures change orders, back charges, failed inspections, and daily progress as structured drafts for the office to review.
+## Vision (v4 pivot)
+Voice-first AI foreman for small subcontractors. Field supers **call or text** the 24/7 AI hotline **+1 (229) 585-7126** (or receive an outbound morning briefing call). The mobile app is the **Office Dashboard** — the office admin (owner/spouse/bookkeeper) reviews drafts, approves change orders, resolves back charges, confirms schedule changes, and manages the team.
 
-## Target Users
-- **Field / Superintendent**: Blue-collar, tech-averse, works from a truck. Uses voice.
-- **Office / Admin**: Reviews drafts, approves change orders, disputes back charges.
+**Non-negotiable rule:** the AI never sends a change order or issues an invoice on its own. Every money item is a **DRAFT ONLY — NOT SENT** until a human approves it in the office view.
 
-## Features Delivered
-### MVP (Iteration 1)
-- Google OAuth (Emergent) + demo mode
-- Morning Briefing (LLM-generated, GPT-5.4-mini)
-- Voice Chat: press-and-hold record → Whisper → GPT-5.4-mini → OpenAI TTS
-- Auto-draft change orders and back charges from chat content
-- Jobs & Crews list with progress bars
-- Job Detail with change orders, back charges, inspections
-- Office Digest with Approve/Reject actions
+## Integrations
+- **GHL Voice AI** — runs the phone conversation, sends post-call webhook to `/api/webhooks/ghl/voice-ai` with transcript + structured extraction (change orders, back charges, schedule changes). Ed25519 signature verified when `GHL_PUBLIC_KEY` is set. Idempotent by `callId`.
+- **Twilio Voice + SMS** — hotline number **+1 (229) 585-7126**. Inbound SMS lands at `/api/webhooks/twilio/sms`, gets AI reply (GPT-5.4-mini) with full conversation history, returns TwiML, logs a `CallLog`, and auto-drafts change orders / back charges / schedule changes when detected.
+- **OpenAI (via Emergent LLM key)** — GPT-5.4-mini for chat + morning briefing + EOD summary; Whisper for STT; TTS-1 for TTS.
+- **Emergent Object Storage** — jobsite photos.
+- **APScheduler** — Weekly Recovery SMS every Monday 8 AM UTC.
 
-### Iteration 2
-- End of Day Check-in (guided per-job walk-through with LLM summary)
-- Photo Attach (Emergent Object Storage → embedded in draft)
-- Missed Money Radar widget on Home
-- Crew Dispatch Board (tomorrow, grouped by crew)
+## Screens (Office Dashboard)
+- **Digest (Home)**: "Morning, <name>." hero, 4 KPI cards, PREVIEW MORNING CALL block, "Needs your call" draft cards, "Crews in motion" job cards.
+- **Inbox**: filter chips (All/Change Orders/Back Charges/Schedule/Inspections), draft cards with APPROVE/REJECT/RESOLVE/CONFIRM.
+- **Jobs**: job list with codes (RIV/OAK/HIL), progress, crew, next milestone. Job detail shows COs/BCs/inspections.
+- **Calls**: 24/7 hotline card, field team management (+ADD SUPER, BRIEF NOW, remove), recent call log with inbound/outbound/voice/sms and draft-count badges.
+- **Settings**: integrations status, weekly recovery text, Twilio + GHL setup instructions with webhook URLs.
+- **Checkin / Dispatch / Job Detail**: preserved sub-screens.
 
-### Iteration 3
-- **Voice Kick Off**: say "wrap it up" (or similar) in Talk → auto-routes to /checkin
-- **Photo Camera**: SNAP button next to GALLERY on Talk uses expo-image-picker `launchCameraAsync`
-- **Dispatch Editor**: tap any assignment card → modal to switch crew or move to a different job (PATCH /api/dispatch/{id})
-- **Weekly Recovery Text**: Twilio SMS on Mondays 8 AM UTC (APScheduler cron). Settings screen for phone + opt-in. Manual "Send Test Text Now" button. Falls back to sms_outbox collection if Twilio env vars are blank.
+## Data Model
+- Users (office admins) · TeamMembers (field supers with phone/timezone/briefing time)
+- Jobs · ChangeOrders · BackCharges · ScheduleChanges · Inspections
+- CallLogs (inbound/outbound, voice/sms, transcript, extracted_drafts, ghl_call_id)
+- CrewAssignments (dispatch board) · CheckinSessions · SmsOutbox · Uploads · GhlEvents
 
-## Tech Stack
-- Frontend: Expo Router, TanStack Query, expo-audio, expo-image-picker, MDI icons, expo-secure-store
-- Backend: FastAPI + Motor (MongoDB), APScheduler (weekly cron), Twilio SMS
-- AI: emergentintegrations (LlmChat GPT-5.4-mini, Whisper, OpenAI TTS)
-- Auth: Emergent Google Auth (+ demo mode)
-- Storage: Emergent Object Storage (photos), MongoDB (everything else)
+## Env
+Backend `.env`:
+- `EMERGENT_LLM_KEY`, `MONGO_URL`, `DB_NAME`
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER="+12295857126"`
+- `GHL_ACCESS_TOKEN`, `GHL_LOCATION_ID`, `GHL_PUBLIC_KEY`
 
 ## Design
-Brutalist industrial: high-contrast black/white with Industrial Orange (#FF5A00), thick 2pt black borders, no shadows, 56pt+ touch targets, walkie-talkie mic hero.
-
-## Env Vars
-- Backend `.env`: `EMERGENT_LLM_KEY`, `MONGO_URL`, `DB_NAME`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`
-- Twilio vars are optional — with them blank, weekly text falls back to `sms_outbox` collection so nothing breaks and messages can be reviewed later.
+Brutalist industrial: black surfaces, Industrial Orange (#FF5A00), thick 2pt borders, no shadows, oversized numeric KPIs, tab bar with Digest/Inbox/Jobs/Calls.

@@ -44,6 +44,16 @@ export async function apiPatch<T>(path: string, body?: any): Promise<T> {
   return res.json();
 }
 
+export async function apiDelete<T>(path: string): Promise<T> {
+  const headers = await authHeaders();
+  const res = await fetch(`${API_BASE}/api${path}`, {
+    method: "DELETE",
+    headers,
+  });
+  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
 export async function uploadAudio(uri: string): Promise<{ text: string }> {
   const headers = await authHeaders();
   const form = new FormData();
