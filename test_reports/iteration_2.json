@@ -1,0 +1,39 @@
+{
+  "summary": "Iteration 2 — all 4 new features verified end-to-end. Backend: 13/13 new pytest cases pass in /app/backend/tests/test_new_features.py (missed-money grand_total > 0 for seeded 10-day-old items, dispatch GET grouped by crew with 3 seeded assignments, dispatch POST creates + persists, checkin start returns first job, checkin answer with 'fail' keyword auto-creates failed inspection, final answer returns done=true with LLM summary, photo upload to Emergent Object Storage returns storage_path+url and is auth-protected, files GET works via ?token= AND Authorization header, missing/invalid token returns 401, chat/send with photo_url attaches photo_url to the created change-order draft). Regression: previous 14/14 in test_backend_api.py still valid. Frontend: Briefing card shows $5,050 missed money with '2 unsigned CO · 1 disputed BC · over 7 days' subtext, quick-eod and quick-dispatch buttons navigate correctly, /dispatch renders '4 assignments across 3 crews' grouped by crew name (Crew A, Crew B, TEST_Crew_Z from POST test) with times/notes, /checkin walks 3 jobs and shows LLM office summary on completion, Talk tab shows attach-photo-btn (PHOTO) next to HOLD TO TALK.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/checkin/answer", "issue": "Chat log entry uses raw job_id: '[End-of-Day · job_xxxxx]'. The LLM summary then echoes those raw IDs instead of job names. Suggest inject job_name when composing the log_text so the LLM summary is human-readable."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend_api.py",
+    "/app/backend/tests/test_new_features.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL polish: In /api/checkin/answer, include job_name in the recorded chat log (e.g., '[End-of-Day · Riverside Apartments]') so the office LLM summary references job names instead of internal IDs."
+  ],
+  "critical_code_review_comments": [
+    "server.py has grown to ~900 lines with the new features — recommend splitting into modules (auth, jobs, chat, uploads, dispatch, checkin, voice) before the next iteration.",
+    "/api/files/{path} correctly supports both Authorization header and ?token= query for <img> tags on web, and enforces ownership via db.uploads.",
+    "Object Storage init runs at startup with EMERGENT_LLM_KEY; stale-key handling (503) implemented — good.",
+    "Missed-money cutoff uses UTC 'now - 7 days' — matches seeded 10-day-old CO/BC data.",
+    "Dispatch GET uses tomorrow's UTC window; this is fine for demo but could feel off around user midnight — acceptable for MVP.",
+    "checkin/answer detects 'fail' or 'inspection' in issues to auto-create failed inspection — worked as designed.",
+    "Chat send correctly attaches photo_url to the auto-created change order draft."
+  ],
+  "updated_files": ["/app/backend/tests/test_new_features.py (new)"],
+  "success_rate": {"backend": "100% (13/13 new + 14/14 regression)", "frontend": "100% (all 4 new flows verified via mobile viewport Playwright)"},
+  "seed_data_creation": "Reused seeded demo data from POST /api/auth/dev-login (2 CO + 1 BC back-dated 10 days, 3 crew_assignments for tomorrow). Added 1 TEST_Crew_Z dispatch, 1 failed inspection via checkin flow, 1 change-order draft with photo_url via chat, and 1 1x1 PNG upload — all prefixed with TEST_ where identifiable.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run both suites: `pytest backend/tests/ -v`. New feature tests in test_new_features.py. Demo credentials in /app/memory/test_credentials.md (no password; POST /api/auth/dev-login). Web preview cannot open expo-image-picker native gallery — validate the /api/uploads/photo endpoint directly (a 1x1 PNG helper is included in test_new_features.py::_mini_png). Talk screen photo-attach button testID='attach-photo-btn', remove-photo appears when pendingPhoto state is set. Missed-money grand_total for seeded demo user = $5,050 (2800 draft CO + 1450 pending CO + 800 disputed BC).",
+  "rca_of_issue": "N/A — no bugs blocking release. Only one cosmetic nit (raw job_ids in EOD summary text)."
+}

@@ -1,0 +1,183 @@
+{
+  "app_name": "SubSidekick",
+  "personality": "5 Brutalist Mobile",
+  "personality_one_liner": "A rugged, no-nonsense industrial command center with oversized targets, high contrast, and a hero walkie-talkie voice interface built for the 8am jobsite.",
+  "color": {
+    "surface": "#FFFFFF",
+    "onSurface": "#09090B",
+    "surfaceSecondary": "#F4F4F5",
+    "onSurfaceSecondary": "#09090B",
+    "surfaceTertiary": "#E4E4E7",
+    "onSurfaceTertiary": "#18181B",
+    "surfaceInverse": "#09090B",
+    "onSurfaceInverse": "#FFFFFF",
+    "brand": "#FF5A00",
+    "onBrand": "#FFFFFF",
+    "brandPrimary": "#FF5A00",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#E04F00",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#FFF1EA",
+    "onBrandTertiary": "#A13800",
+    "success": "#166534",
+    "onSuccess": "#FFFFFF",
+    "warning": "#EAB308",
+    "onWarning": "#000000",
+    "error": "#DC2626",
+    "onError": "#FFFFFF",
+    "info": "#0F172A",
+    "onInfo": "#FFFFFF",
+    "border": "#E4E4E7",
+    "borderStrong": "#09090B",
+    "divider": "#E4E4E7",
+    "muted": "#71717A"
+  },
+  "typography": {
+    "displayFontFamily": "Barlow_700Bold",
+    "textFontFamily": "IBMPlexSans_500Medium",
+    "scale": {
+      "sm": 14,
+      "base": 16,
+      "lg": 18,
+      "xl": 24,
+      "2xl": 32,
+      "3xl": 48
+    }
+  },
+  "spacing": {
+    "rule": "Generous and oversized. Minimum touch target height is 56pt to accommodate gloved hands. Avoid tight clustering.",
+    "xs": 8,
+    "sm": 12,
+    "md": 16,
+    "lg": 24,
+    "xl": 32,
+    "2xl": 48,
+    "3xl": 64
+  },
+  "radius_tokens": {
+    "sm": 0,
+    "md": 4,
+    "lg": 8,
+    "pill": 999
+  },
+  "shadow_tier": "0",
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor (weight: bold)",
+  "glassmorphism": {
+    "enabled": false,
+    "do's": [],
+    "dont's": [
+      "Do not use any blur or glass effects. Brutalist UI relies on solid colors, thick 2pt borders (borderStrong), and hard structural contrast."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "solid surfaceSecondary",
+      "android": "solid surfaceSecondary",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Auth / Onboarding",
+      "purpose": "Google sign-in and rugged brand introduction.",
+      "states": {
+        "loading": "High-contrast spinner centered on screen.",
+        "empty": "N/A",
+        "error": "Solid red (#DC2626) snackbar with stark white text."
+      },
+      "layout": "Full-bleed hero image of construction site with a dark gradient scrim (top to bottom). Massive 'Google Sign In' button anchored at the bottom with a 2pt solid black border and 56pt minimum height. Oversized 'SubSidekick' wordmark in Barlow."
+    },
+    {
+      "name": "Home / Daily Briefing",
+      "purpose": "AI-generated morning summary and voice-first interaction hub.",
+      "states": {
+        "loading": "Skeleton loaders using stark grey blocks.",
+        "empty": "N/A",
+        "error": "Error card with a thick black outline and 'Retry' button."
+      },
+      "layout": "Rigid grid structure. Top: Large 'Morning Briefing' text block. Middle: Action-required list rows with thick dividers. Bottom: Fixed, oversized 'Push-to-Talk' mic FAB (walkie-talkie style) hovering directly above the bottom tab bar. When mic is pressed, display a stark waveform animation."
+    },
+    {
+      "name": "Voice Chat (AI Foreman)",
+      "purpose": "Live conversation thread and tap-to-talk interface.",
+      "states": {
+        "loading": "Listening indicator / processing waveform.",
+        "empty": "Illustration of blueprint sketch with 'Tap and hold to talk' prompt.",
+        "error": "Connection error banner with manual retry."
+      },
+      "layout": "Message bubbles use hard-edged rectangles rather than soft pills. Transcriptions are large (18pt+). The bottom 1/3rd of the screen is dedicated to the massive Walkie-Talkie primary CTA (solid Industrial Orange, 2pt black border, active state color flip to black). Keep controls oversized."
+    },
+    {
+      "name": "Jobs & Crews",
+      "purpose": "Status list of all ongoing jobs and crew assignments.",
+      "states": {
+        "loading": "Blocky block-reveal animations.",
+        "empty": "Blueprint graphic with 'No active jobs' text.",
+        "error": "Thick-bordered error card."
+      },
+      "layout": "Edge-to-edge list rows. Each row is highly structured: Job Name (oversized), GC/Status tags (solid pill tags with harsh contrast), separated by 1pt or 2pt black dividers. No floating cards."
+    },
+    {
+      "name": "Job Detail",
+      "purpose": "Drill-down into progress, change orders, and back charges.",
+      "states": {
+        "loading": "Skeleton rows.",
+        "empty": "Empty state illustration of safety helmet.",
+        "error": "Standard stark error banner."
+      },
+      "layout": "Header features a job site photo with a heavy scrim and white text. Segmented controls (using thick outlines, no soft shadows) to toggle between Progress, Orders, Charges. Data points are displayed as condensed metric blocks."
+    },
+    {
+      "name": "Change Orders / Back Charges",
+      "purpose": "Dispute logging with photos, amounts, and timestamps.",
+      "states": {
+        "loading": "Loading spinner.",
+        "empty": "No disputes logged.",
+        "error": "Upload failure banner."
+      },
+      "layout": "List of large thumbnail-led rows for quick photo scanning. Tapping a row opens a full-screen view with a massive 'Approve/Reject' sticky footer (56pt tall buttons, full width)."
+    },
+    {
+      "name": "Office Digest",
+      "purpose": "Admin view of drafts needing review and signature.",
+      "states": {
+        "loading": "Skeleton.",
+        "empty": "All caught up.",
+        "error": "Sync error."
+      },
+      "layout": "Dashboard-like layout with stark status cards. 'Awaiting Signature' items use the Industrial Orange accent as a structural left-border. Heavy emphasis on 'Action Required' typography."
+    }
+  ],
+  "images": {
+    "auth_hero": {
+      "url": "https://images.unsplash.com/photo-1609867271967-a82f85c48531?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHwxfHxjb25zdHJ1Y3Rpb24lMjBzaXRlJTIwZnJhbWluZyUyMG1vcm5pbmd8ZW58MHx8fHwxNzg5NDkyMDMzfDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Construction site with crane in morning light"
+    },
+    "job_detail_hero": {
+      "url": "https://images.unsplash.com/photo-1786859864999-2a969564ae2e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHwzfHxjb25zdHJ1Y3Rpb24lMjBzaXRlJTIwZnJhbWluZyUyMG1vcm5pbmd8ZW58MHx8fHwxNzg5NDkyMDMzfDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Silhouette of house frame under construction"
+    },
+    "avatar_foreman": {
+      "url": "https://images.unsplash.com/photo-1621905252507-b35492cc74b4?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2ODh8MHwxfHNlYXJjaHwyfHxydWdnZWQlMjBjb25zdHJ1Y3Rpb24lMjBjb250cmFjdG9yJTIwd29ya2VyJTIwcG9ydHJhaXR8ZW58MHx8fHwxNzg5NDkyMDMzfDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Rugged construction worker in hard hat"
+    },
+    "empty_blueprint": {
+      "url": "https://images.unsplash.com/photo-1721244654392-9c912a6eb236?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDJ8MHwxfHNlYXJjaHwxfHxibHVlcHJpbnQlMjBza2V0Y2glMjBhcmNoaXRlY3R1cmUlMjBhcmNoaXRlY3R1cmUlMjBkcmF3aW5nfGVufDB8fHx8MTc4OTQ5MjA1MXww&ixlib=rb-4.1.0&q=85",
+      "alt": "Blueprint sketch drawing"
+    }
+  },
+  "instructions_to_main_agent": [
+    "VIBE & AESTHETIC: This is a Brutalist, high-contrast, 'work truck at 8am' UI. No glassmorphism, no soft shadows, no gentle pastels. Everything is structurally defined by 2pt borders (borderStrong), solid fills, and stark #FFFFFF / #09090B contrast.",
+    "TOUCH TARGETS: Crucial requirement - users will be wearing gloves. All Pressable elements MUST have a minimum height of 56pt. Ensure generous padding inside list items and inputs.",
+    "HERO INTERACTION (VOICE): The Walkie-Talkie interface is the star. Design the Push-to-Talk (PTT) button to be massive (taking up significant lower screen estate) with a solid 'brandPrimary' fill. Implement an inverted color flip (e.g., to black) on press. Provide stark waveform visual feedback.",
+    "TYPOGRAPHY: Use Barlow_700Bold for massive headers and structural labels. Use IBMPlexSans_500Medium for all body text to ensure extreme readability in daylight.",
+    "IMAGE HANDLING: Ensure any text laid over the 'auth_hero' or 'job_detail_hero' uses the exact vertical gradient scrim (transparent to surfaceInverse) pattern to guarantee contrast.",
+    "BORDERS OVER SHADOWS: Strip out all React Native shadows (elevation/shadowColor). Use borderWidth: 2 and borderColor: theme.color.borderStrong to separate components."
+  ]
+}
