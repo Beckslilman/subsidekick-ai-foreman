@@ -43,9 +43,14 @@ export default function HomeScreen() {
               {user?.name?.split(" ")[0] || "Foreman"}
             </Text>
           </View>
-          <Pressable testID="signout-button" onPress={signOut} hitSlop={12}>
-            <Icon name="logout" size={24} color={colors.onSurfaceInverse} />
-          </Pressable>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+            <Pressable testID="settings-button" onPress={() => router.push("/settings")} hitSlop={12}>
+              <Icon name="cog" size={22} color={colors.onSurfaceInverse} />
+            </Pressable>
+            <Pressable testID="signout-button" onPress={signOut} hitSlop={12}>
+              <Icon name="logout" size={24} color={colors.onSurfaceInverse} />
+            </Pressable>
+          </View>
         </View>
       </View>
 

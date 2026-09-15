@@ -28,6 +28,31 @@ db = client[os.environ['DB_NAME']]
 
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
+# ---------------- Twilio SMS ----------------
+TWILIO_SID = os.environ.get('TWILIO_ACCOUNT_SID', '').strip()
+TWILIO_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '').strip()
+TWILIO_FROM = os.environ.get('TWILIO_FROM_NUMBER', '').strip()
+
+def _twilio_client():
+    if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM):
+        return None
+    try:
+        from twilio.rest import Client
+        return Client(TWILIO_SID, TWILIO_TOKEN)
+    except Exception:
+        return None
+
+def _send_sms_sync(to: str, body: str) -> dict:
+    """Send via Twilio if configured, else log to outbox. Returns result dict."""
+    client_obj = _twilio_client()
+    if not client_obj:
+        return {"provider": "outbox", "to": to, "body": body}
+    try:
+        msg = client_obj.messages.create(from_=TWILIO_FROM, to=to, body=body)
+        return {"provider": "twilio", "sid": msg.sid, "to": to, "body": body}
+    except Exception as e:
+        return {"provider": "outbox", "to": to, "body": body, "error": str(e)}
+
 # ---------------- Emergent Object Storage ----------------
 STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
 STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
@@ -84,6 +109,8 @@ class User(BaseModel):
     email: str
     name: str
     picture: Optional[str] = None
+    phone_number: Optional[str] = None
+    sms_opt_in: bool = False
     created_at: datetime = Field(default_factory=utcnow)
 
 class SessionRequest(BaseModel):
@@ -212,6 +239,18 @@ class CheckinSession(BaseModel):
     completed_at: Optional[datetime] = None
     summary: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
+
+# --- Settings ---
+class SettingsUpdate(BaseModel):
+    phone_number: Optional[str] = None
+    sms_opt_in: Optional[bool] = None
+
+# --- Dispatch ---
+class DispatchUpdate(BaseModel):
+    crew: Optional[str] = None
+    job_id: Optional[str] = None
+    date: Optional[datetime] = None
+    notes: Optional[str] = None
 
 # ---------------- Auth Helpers ----------------
 async def get_current_user(request: Request) -> User:
@@ -561,6 +600,14 @@ async def chat_send(payload: ChatSendRequest, user: User = Depends(get_current_u
 
     # Simple heuristic detection to auto-create drafts
     text_lower = payload.content.lower()
+    route_hint = None
+    action_hint = None
+
+    # Voice kickoff: End of Day
+    if any(k in text_lower for k in ["wrap it up", "wrap up the day", "end of day", "end my day", "wrapping up", "day's done", "day is done", "call it a day"]):
+        route_hint = "/checkin"
+        action_hint = "start_checkin"
+
     if any(k in text_lower for k in ["change order", "extra work", "not in the bid", "added scope"]):
         # pick first active job as target if only one
         if jobs:
@@ -589,6 +636,7 @@ async def chat_send(payload: ChatSendRequest, user: User = Depends(get_current_u
         "user_message": user_msg.model_dump(mode="json"),
         "ai_message": ai_msg.model_dump(mode="json"),
         "action_hint": action_hint,
+        "route_hint": route_hint,
     }
 
 # ---------------- Uploads (Emergent Object Storage) ----------------
@@ -856,6 +904,138 @@ async def voice_audio(key: str):
     return Response(content=path.read_bytes(), media_type="audio/mpeg",
                     headers={"Cache-Control": "public, max-age=31536000"})
 
+# ---------------- Settings ----------------
+@api_router.patch("/settings", response_model=User)
+async def update_settings(payload: SettingsUpdate, user: User = Depends(get_current_user)):
+    updates: dict = {}
+    if payload.phone_number is not None:
+        # Basic sanity: allow +digits, no other chars, min 10
+        pn = "".join(ch for ch in payload.phone_number if ch.isdigit() or ch == "+").strip()
+        if pn and not pn.startswith("+"):
+            pn = "+" + pn
+        if pn and len(pn) < 8:
+            raise HTTPException(400, "Phone number looks invalid")
+        updates["phone_number"] = pn or None
+    if payload.sms_opt_in is not None:
+        updates["sms_opt_in"] = payload.sms_opt_in
+    if updates:
+        await db.users.update_one({"user_id": user.user_id}, {"$set": updates})
+    doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    return User(**doc)
+
+# ---------------- Dispatch update / reassign ----------------
+@api_router.patch("/dispatch/{dispatch_id}", response_model=CrewAssignment)
+async def update_dispatch(dispatch_id: str, payload: DispatchUpdate, user: User = Depends(get_current_user)):
+    updates: dict = {}
+    if payload.job_id is not None:
+        job = await db.jobs.find_one({"id": payload.job_id, "user_id": user.user_id}, {"_id": 0})
+        if not job:
+            raise HTTPException(404, "Job not found")
+        updates["job_id"] = payload.job_id
+        updates["job_name"] = job["name"]
+    if payload.crew is not None:
+        updates["crew"] = payload.crew
+    if payload.date is not None:
+        updates["date"] = payload.date
+    if payload.notes is not None:
+        updates["notes"] = payload.notes
+    if not updates:
+        raise HTTPException(400, "No updates provided")
+    r = await db.crew_assignments.update_one(
+        {"id": dispatch_id, "user_id": user.user_id}, {"$set": updates}
+    )
+    if r.matched_count == 0:
+        raise HTTPException(404, "Assignment not found")
+    doc = await db.crew_assignments.find_one({"id": dispatch_id, "user_id": user.user_id}, {"_id": 0})
+    return CrewAssignment(**doc)
+
+@api_router.delete("/dispatch/{dispatch_id}")
+async def delete_dispatch(dispatch_id: str, user: User = Depends(get_current_user)):
+    r = await db.crew_assignments.delete_one({"id": dispatch_id, "user_id": user.user_id})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Assignment not found")
+    return {"ok": True}
+
+# ---------------- Weekly Recovery SMS ----------------
+def _format_recovery_text(name: str, money: dict) -> str:
+    return (
+        f"SubSidekick weekly recap for {name.split(' ')[0]}: "
+        f"${int(money['grand_total']):,} sitting on the table — "
+        f"{money['unsigned_change_orders_count']} unsigned change orders "
+        f"(${int(money['unsigned_change_orders_total']):,}) and "
+        f"{money['disputed_back_charges_count']} disputed back charges "
+        f"(${int(money['disputed_back_charges_total']):,}) over 7 days old. "
+        f"Open the app to knock 'em down."
+    )
+
+async def _compute_recovery(user_id: str) -> dict:
+    cutoff = utcnow() - timedelta(days=7)
+    open_cos = await db.change_orders.find(
+        {"user_id": user_id, "status": {"$in": ["draft", "pending"]}, "created_at": {"$lte": cutoff}},
+        {"_id": 0},
+    ).to_list(200)
+    disputed_bcs = await db.back_charges.find(
+        {"user_id": user_id, "status": {"$in": ["draft", "disputed"]}, "created_at": {"$lte": cutoff}},
+        {"_id": 0},
+    ).to_list(200)
+    co_total = sum((c.get("amount") or 0) for c in open_cos)
+    bc_total = sum((b.get("amount") or 0) for b in disputed_bcs)
+    return {
+        "unsigned_change_orders_total": co_total,
+        "disputed_back_charges_total": bc_total,
+        "grand_total": co_total + bc_total,
+        "unsigned_change_orders_count": len(open_cos),
+        "disputed_back_charges_count": len(disputed_bcs),
+    }
+
+@api_router.get("/recovery/preview")
+async def recovery_preview(user: User = Depends(get_current_user)):
+    money = await _compute_recovery(user.user_id)
+    body = _format_recovery_text(user.name, money)
+    return {"body": body, "phone_number": user.phone_number, "sms_opt_in": user.sms_opt_in, "money": money}
+
+@api_router.post("/recovery/send")
+async def recovery_send(user: User = Depends(get_current_user)):
+    """Manually trigger a weekly recovery SMS for the current user."""
+    if not user.phone_number:
+        raise HTTPException(400, "No phone number on file. Add one in Settings.")
+    money = await _compute_recovery(user.user_id)
+    body = _format_recovery_text(user.name, money)
+    result = await run_in_threadpool(_send_sms_sync, user.phone_number, body)
+    await db.sms_outbox.insert_one({
+        "user_id": user.user_id,
+        "to": user.phone_number,
+        "body": body,
+        "provider": result.get("provider"),
+        "sid": result.get("sid"),
+        "error": result.get("error"),
+        "created_at": utcnow(),
+        "trigger": "manual",
+    })
+    return {"delivered_via": result.get("provider"), "body": body, "phone": user.phone_number, "sid": result.get("sid"), "twilio_configured": bool(_twilio_client())}
+
+async def _run_weekly_recovery_for_all():
+    logger.info("Running weekly recovery job")
+    async for u in db.users.find({"sms_opt_in": True, "phone_number": {"$ne": None}}, {"_id": 0}):
+        try:
+            money = await _compute_recovery(u["user_id"])
+            if money["grand_total"] <= 0:
+                continue
+            body = _format_recovery_text(u.get("name") or "Foreman", money)
+            result = await run_in_threadpool(_send_sms_sync, u["phone_number"], body)
+            await db.sms_outbox.insert_one({
+                "user_id": u["user_id"],
+                "to": u["phone_number"],
+                "body": body,
+                "provider": result.get("provider"),
+                "sid": result.get("sid"),
+                "error": result.get("error"),
+                "created_at": utcnow(),
+                "trigger": "weekly",
+            })
+        except Exception:
+            logger.exception(f"Weekly recovery failed for {u.get('user_id')}")
+
 # ---------------- Root ----------------
 @api_router.get("/")
 async def root():
@@ -891,6 +1071,19 @@ async def on_startup():
         logger.info("Object storage initialized")
     except Exception as e:
         logger.warning(f"Object storage init failed: {e}")
+    # Start weekly recovery scheduler (Mondays 8am UTC)
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        global _scheduler
+        _scheduler = AsyncIOScheduler(timezone=timezone.utc)
+        _scheduler.add_job(_run_weekly_recovery_for_all, CronTrigger(day_of_week="mon", hour=8, minute=0), id="weekly_recovery")
+        _scheduler.start()
+        logger.info("Weekly recovery scheduler started")
+    except Exception as e:
+        logger.warning(f"Scheduler start failed: {e}")
+
+_scheduler = None
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

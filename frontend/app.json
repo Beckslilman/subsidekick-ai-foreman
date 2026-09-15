@@ -22,7 +22,7 @@
         "backgroundColor": "#000000"
       },
       "package": "com.emergent.sidekickappbuild.ixq0iw",
-      "permissions": ["android.permission.RECORD_AUDIO", "android.permission.READ_MEDIA_IMAGES"]
+      "permissions": ["android.permission.RECORD_AUDIO", "android.permission.READ_MEDIA_IMAGES", "android.permission.CAMERA"]
     },
     "web": {
       "bundler": "metro",
@@ -54,7 +54,8 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Attach jobsite photos to change orders and back charges."
+          "photosPermission": "Attach jobsite photos to change orders and back charges.",
+          "cameraPermission": "Snap jobsite photos to attach to change orders and back charges."
         }
       ],
       "@react-native-vector-icons/material-design-icons"

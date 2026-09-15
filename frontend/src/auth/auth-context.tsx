@@ -12,6 +12,8 @@ export type AuthUser = {
   email: string;
   name: string;
   picture?: string | null;
+  phone_number?: string | null;
+  sms_opt_in?: boolean;
 };
 
 type AuthContextType = {

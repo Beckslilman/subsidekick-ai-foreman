@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { View, Text, ScrollView, Pressable, ActivityIndicator, Platform, Image } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import Icon from "@react-native-vector-icons/material-design-icons";
 import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder, useAudioRecorderState, createAudioPlayer } from "expo-audio";
 import * as ImagePicker from "expo-image-picker";
@@ -14,6 +15,7 @@ type ChatMessage = { id: string; role: "user" | "assistant"; content: string; au
 export default function VoiceScreen() {
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recState = useAudioRecorderState(recorder);
   const [busy, setBusy] = useState(false);
@@ -68,7 +70,7 @@ export default function VoiceScreen() {
     try {
       const body: any = { content: text || "(photo attached)" };
       if (pendingPhoto) body.photo_url = pendingPhoto.url;
-      const resp = await apiPost<{ ai_message: ChatMessage }>("/chat/send", body);
+      const resp = await apiPost<{ ai_message: ChatMessage; route_hint?: string }>("/chat/send", body);
       setPendingPhoto(null);
       await qc.invalidateQueries({ queryKey: ["chat-history"] });
       await qc.invalidateQueries({ queryKey: ["digest"] });
@@ -76,6 +78,10 @@ export default function VoiceScreen() {
       await qc.invalidateQueries({ queryKey: ["back-charges"] });
       await qc.invalidateQueries({ queryKey: ["missed-money"] });
       if (resp.ai_message?.content) playTTS(resp.ai_message.content);
+      // Voice kickoff routing
+      if (resp.route_hint === "/checkin") {
+        setTimeout(() => router.push("/checkin"), 600);
+      }
     } catch (e: any) {
       console.warn("send failed", e);
     } finally { setBusy(false); }
@@ -83,7 +89,6 @@ export default function VoiceScreen() {
 
   async function pickPhoto() {
     try {
-      // Ask permission first
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
         console.warn("photo permission denied");
@@ -100,6 +105,27 @@ export default function VoiceScreen() {
       setPendingPhoto({ url: uploaded.url, localUri: asset.uri });
     } catch (e) {
       console.warn("photo pick failed", e);
+    } finally { setBusy(false); }
+  }
+
+  async function takePhoto() {
+    try {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        console.warn("camera permission denied");
+        return;
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ["images"],
+        quality: 0.7,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+      const asset = result.assets[0];
+      setBusy(true);
+      const uploaded = await uploadPhoto(asset.uri);
+      setPendingPhoto({ url: uploaded.url, localUri: asset.uri });
+    } catch (e) {
+      console.warn("camera failed", e);
     } finally { setBusy(false); }
   }
 
@@ -126,6 +152,7 @@ export default function VoiceScreen() {
   }
 
   const suggestions = [
+    "Wrap it up for the day",
     "GC added extra work on east wall",
     "Failed inspection on Maple Street",
     "GC's back-charging $800 for cleanup",
@@ -161,14 +188,6 @@ export default function VoiceScreen() {
             <Text style={{ marginTop: 6, color: colors.muted, fontSize: 14, textAlign: "center", paddingHorizontal: spacing.lg }}>
               Report change orders, back charges, failed inspections. Add a photo. The office reviews it.
             </Text>
-            <View style={{ marginTop: spacing.lg, width: "100%", gap: spacing.sm }}>
-              {suggestions.map((s, i) => (
-                <Pressable key={i} testID={`suggestion-${i}`} onPress={() => sendText(s)}
-                  style={{ borderWidth: 2, borderColor: colors.borderStrong, padding: spacing.md, minHeight: 56, justifyContent: "center" }}>
-                  <Text style={{ color: colors.onSurface, fontSize: 15, fontWeight: "600" }}>"{s}"</Text>
-                </Pressable>
-              ))}
-            </View>
           </View>
         ) : (
           (history.data ?? []).map((m) => (
@@ -199,6 +218,24 @@ export default function VoiceScreen() {
         )}
       </ScrollView>
 
+      {/* Suggestion chips — always visible */}
+      <View style={{ borderTopWidth: 2, borderColor: colors.borderStrong, backgroundColor: colors.surface }}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: spacing.sm, paddingVertical: spacing.sm, height: 56, alignItems: "center" }}>
+          {suggestions.map((s, i) => (
+            <Pressable key={i} testID={`suggestion-${i}`} onPress={() => sendText(s)}
+              style={{
+                height: 40, paddingHorizontal: spacing.md, justifyContent: "center",
+                borderWidth: 2, borderColor: colors.borderStrong,
+                backgroundColor: i === 0 ? colors.brandTertiary : colors.surface,
+                flexShrink: 0,
+              }}>
+              <Text style={{ color: colors.onSurface, fontSize: 12, fontWeight: "800" }} numberOfLines={1}>"{s}"</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      </View>
+
       {/* Pending photo preview */}
       {pendingPhoto && (
         <View style={{ paddingHorizontal: spacing.lg, paddingBottom: spacing.sm, backgroundColor: colors.surface, borderTopWidth: 2, borderColor: colors.borderStrong }}>
@@ -219,18 +256,32 @@ export default function VoiceScreen() {
       <View style={{ padding: spacing.lg, paddingBottom: insets.bottom + spacing.lg, backgroundColor: colors.surface, borderTopWidth: 2, borderColor: colors.borderStrong }}>
         <View style={{ flexDirection: "row", gap: spacing.sm }}>
           <Pressable
-            testID="attach-photo-btn"
-            onPress={pickPhoto}
+            testID="take-photo-btn"
+            onPress={takePhoto}
             disabled={busy}
             style={({ pressed }) => ({
-              width: 88, minHeight: 88,
+              width: 64, minHeight: 88,
               backgroundColor: pressed ? colors.surfaceInverse : colors.surface,
               borderWidth: 2, borderColor: colors.borderStrong,
               alignItems: "center", justifyContent: "center",
             })}
           >
-            <Icon name="camera" size={28} color={colors.onSurface} />
-            <Text style={{ color: colors.onSurface, fontSize: 10, fontWeight: "900", letterSpacing: 1, marginTop: 2 }}>PHOTO</Text>
+            <Icon name="camera" size={26} color={colors.onSurface} />
+            <Text style={{ color: colors.onSurface, fontSize: 9, fontWeight: "900", letterSpacing: 1, marginTop: 2 }}>SNAP</Text>
+          </Pressable>
+          <Pressable
+            testID="attach-photo-btn"
+            onPress={pickPhoto}
+            disabled={busy}
+            style={({ pressed }) => ({
+              width: 64, minHeight: 88,
+              backgroundColor: pressed ? colors.surfaceInverse : colors.surface,
+              borderWidth: 2, borderColor: colors.borderStrong,
+              alignItems: "center", justifyContent: "center",
+            })}
+          >
+            <Icon name="image-multiple" size={26} color={colors.onSurface} />
+            <Text style={{ color: colors.onSurface, fontSize: 9, fontWeight: "900", letterSpacing: 1, marginTop: 2 }}>GALLERY</Text>
           </Pressable>
           <Pressable
             testID="ptt-button"
@@ -250,8 +301,8 @@ export default function VoiceScreen() {
               opacity: busy ? 0.6 : 1,
             })}
           >
-            <Icon name={recState.isRecording ? "record-circle" : "microphone"} size={32} color={recState.isRecording ? colors.brandPrimary : colors.onBrandPrimary} />
-            <Text style={{ color: recState.isRecording ? colors.onSurfaceInverse : colors.onBrandPrimary, fontSize: 18, fontWeight: "900", letterSpacing: 1 }}>
+            <Icon name={recState.isRecording ? "record-circle" : "microphone"} size={30} color={recState.isRecording ? colors.brandPrimary : colors.onBrandPrimary} />
+            <Text style={{ color: recState.isRecording ? colors.onSurfaceInverse : colors.onBrandPrimary, fontSize: 16, fontWeight: "900", letterSpacing: 1 }}>
               {recState.isRecording ? "RELEASE" : "HOLD TO TALK"}
             </Text>
           </Pressable>
