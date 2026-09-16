@@ -3,13 +3,25 @@ from fastapi.concurrency import run_in_threadpool
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os, io, base64, logging, tempfile, inspect, hashlib, requests, json
+from pymongo.errors import DuplicateKeyError
+import os, io, logging, tempfile, inspect, hashlib, requests, json
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Any
 import uuid
 from datetime import datetime, timedelta, timezone
 import httpx
+
+from webhook_security import (
+    dev_login_allowed,
+    env_truthy,
+    ghl_signature_ok,
+    render_sms_twiml,
+    twilio_auth_token,
+    twilio_request_url_from_request,
+    twilio_signature_required,
+    verify_twilio_signature,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -48,27 +60,6 @@ def _send_sms_sync(to: str, body: str) -> dict:
 GHL_ACCESS_TOKEN = os.environ.get('GHL_ACCESS_TOKEN', '').strip()
 GHL_LOCATION_ID = os.environ.get('GHL_LOCATION_ID', '').strip()
 GHL_PUBLIC_KEY_PEM = os.environ.get('GHL_PUBLIC_KEY', '').strip()
-
-def _load_ghl_key():
-    if not GHL_PUBLIC_KEY_PEM:
-        return None
-    try:
-        from cryptography.hazmat.primitives import serialization
-        return serialization.load_pem_public_key(GHL_PUBLIC_KEY_PEM.replace("\\n", "\n").encode())
-    except Exception:
-        return None
-
-_ghl_pubkey = _load_ghl_key()
-
-def _verify_ghl_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
-    if not _ghl_pubkey or not signature_header:
-        return False
-    try:
-        sig = base64.b64decode(signature_header, validate=True)
-        _ghl_pubkey.verify(sig, raw_body)
-        return True
-    except Exception:
-        return False
 
 # --- Emergent Object Storage ---
 STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
@@ -121,6 +112,8 @@ class User(BaseModel):
     ghl_access_token_set: bool = False
     ghl_location_id: Optional[str] = None
     twilio_configured: bool = False
+    twilio_account_sid_set: bool = False
+    twilio_auth_token_set: bool = False
     created_at: datetime = Field(default_factory=utcnow)
 
 class SessionRequest(BaseModel):
@@ -278,10 +271,10 @@ class ChatMessage(BaseModel):
 class SettingsUpdate(BaseModel):
     phone_number: Optional[str] = None
     sms_opt_in: Optional[bool] = None
-    ghl_access_token: Optional[str] = None  # write-only
+    ghl_access_token: Optional[str] = None  # write-only; not persisted — env is source of truth
     ghl_location_id: Optional[str] = None
-    twilio_account_sid: Optional[str] = None
-    twilio_auth_token: Optional[str] = None
+    twilio_account_sid: Optional[str] = None  # write-only; not persisted — env is source of truth
+    twilio_auth_token: Optional[str] = None  # write-only; not persisted — env is source of truth
     twilio_from_number: Optional[str] = None
 
 class StatusUpdate(BaseModel):
@@ -345,6 +338,8 @@ async def create_session(payload: SessionRequest):
 
 @api_router.post("/auth/dev-login", response_model=SessionResponse)
 async def dev_login():
+    if not dev_login_allowed():
+        raise HTTPException(status_code=403, detail="Demo login is disabled")
     email = "demo@subsidekick.com"
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
@@ -783,8 +778,9 @@ async def _chat_with_context(user_id: str, content: str, channel: str = "chat", 
     a_msg = ChatMessage(user_id=user_id, role="assistant", content=ai_text, channel=channel)
     await db.chat_messages.insert_one(a_msg.model_dump())
 
-    # Draft detection (rules identical to previous impl)
+    # Draft detection (rules identical to previous impl) — DRAFT ONLY, never auto-sent
     action_hint = None; route_hint = None
+    extracted_drafts: list[str] = []
     tl = content.lower()
     if any(k in tl for k in ["wrap it up", "wrap up the day", "end of day", "call it a day", "day is done"]):
         route_hint = "/checkin"; action_hint = "start_checkin"
@@ -797,6 +793,7 @@ async def _chat_with_context(user_id: str, content: str, channel: str = "chat", 
                 source=("sms" if channel == "sms" else "chat"),
             )
             await db.change_orders.insert_one(co.model_dump())
+            extracted_drafts.append(co.id)
             action_hint = "change_order_draft_created"
     elif "back charge" in tl or "back-charge" in tl:
         if jobs:
@@ -807,6 +804,7 @@ async def _chat_with_context(user_id: str, content: str, channel: str = "chat", 
                 source=("sms" if channel == "sms" else "chat"),
             )
             await db.back_charges.insert_one(bc.model_dump())
+            extracted_drafts.append(bc.id)
             action_hint = "back_charge_draft_created"
     elif any(k in tl for k in ["schedule change", "reschedule", "pushed to", "moved to", "delayed"]):
         if jobs:
@@ -817,11 +815,13 @@ async def _chat_with_context(user_id: str, content: str, channel: str = "chat", 
                 source=("sms" if channel == "sms" else "chat"),
             )
             await db.schedule_changes.insert_one(sc.model_dump())
+            extracted_drafts.append(sc.id)
             action_hint = "schedule_change_draft_created"
 
     return {"user_message": u_msg.model_dump(mode="json"),
             "ai_message": a_msg.model_dump(mode="json"),
-            "action_hint": action_hint, "route_hint": route_hint}
+            "action_hint": action_hint, "route_hint": route_hint,
+            "extracted_drafts": extracted_drafts}
 
 @api_router.post("/chat/send")
 async def chat_send(payload: ChatSendRequest, user: User = Depends(get_current_user)):
@@ -832,33 +832,51 @@ async def chat_send(payload: ChatSendRequest, user: User = Depends(get_current_u
 async def twilio_sms_inbound(request: Request):
     """Twilio POSTs form-encoded. From=+E164, Body=text, To=twilio number."""
     form = await request.form()
+    params = {k: str(form.get(k) or "") for k in form.keys()}
+    if twilio_signature_required():
+        signature = request.headers.get("X-Twilio-Signature") or request.headers.get("x-twilio-signature")
+        url = twilio_request_url_from_request(request)
+        if not verify_twilio_signature(url, params, signature, auth_token=twilio_auth_token()):
+            raise HTTPException(status_code=403, detail="Invalid Twilio signature")
     from_number = (form.get("From") or "").strip()
     body = (form.get("Body") or "").strip()
     to_number = (form.get("To") or "").strip()
+    message_sid = (form.get("MessageSid") or form.get("SmsSid") or "").strip()
+    if message_sid:
+        try:
+            await db.twilio_inbound_sids.insert_one(
+                {"message_sid": message_sid, "received_at": utcnow()}
+            )
+        except DuplicateKeyError:
+            return Response(content=render_sms_twiml(""), media_type="application/xml")
     # Route to the team member's owner
     tm = await db.team_members.find_one({"phone_number": from_number, "active": True}, {"_id": 0})
     if not tm:
-        # Unknown sender — return a friendly TwiML
-        twiml = "<?xml version='1.0' encoding='UTF-8'?><Response><Message>This number isn't set up yet. Ask your office admin to add you to SubSidekick.</Message></Response>"
-        return Response(content=twiml, media_type="application/xml")
+        return Response(
+            content=render_sms_twiml("This number isn't set up yet. Ask your office admin to add you to SubSidekick."),
+            media_type="application/xml",
+        )
     result = await _chat_with_context(tm["user_id"], body, channel="sms", from_number=from_number)
-    # Log the exchange as a CallLog (sms channel)
+    extracted_ids = result.get("extracted_drafts") or []
+    # Log the exchange as a CallLog (sms channel), including draft IDs (GHL parity)
     call = CallLog(
         user_id=tm["user_id"], direction="inbound", channel="sms",
         from_number=from_number, to_number=to_number,
         team_member_id=tm["id"], team_member_name=tm["name"],
         transcript=body, summary=(result["ai_message"]["content"][:200]),
+        extracted_drafts=extracted_ids,
     )
     await db.call_logs.insert_one(call.model_dump())
-    twiml = f"<?xml version='1.0' encoding='UTF-8'?><Response><Message>{result['ai_message']['content']}</Message></Response>"
-    return Response(content=twiml, media_type="application/xml")
+    return Response(content=render_sms_twiml(result["ai_message"]["content"]), media_type="application/xml")
 
 # ---------------- GHL Webhook (Voice AI) ----------------
 @api_router.post("/webhooks/ghl/voice-ai")
 async def ghl_voice_webhook(request: Request):
     raw = await request.body()
     sig = request.headers.get("x-ghl-signature") or request.headers.get("X-GHL-Signature")
-    verified = _verify_ghl_signature(raw, sig) if _ghl_pubkey else False
+    enforced, verified = ghl_signature_ok(raw, sig)
+    if enforced and not verified:
+        raise HTTPException(status_code=401, detail="Invalid GHL signature")
     try:
         payload = json.loads(raw or b"{}")
     except Exception:
@@ -943,15 +961,29 @@ async def update_settings(payload: SettingsUpdate, user: User = Depends(get_curr
         up["phone_number"] = pn or None
     if payload.sms_opt_in is not None: up["sms_opt_in"] = payload.sms_opt_in
     if payload.ghl_location_id is not None: up["ghl_location_id"] = payload.ghl_location_id.strip() or None
+    # SID/token/PIT are accepted so the form does not fail, but they are never stored.
+    # Runtime Twilio/GHL still come from Deployment Secrets (process env).
+    unset: dict = {}
     if payload.ghl_access_token is not None:
-        up["ghl_access_token_encrypted"] = payload.ghl_access_token  # dev-mode only; encrypt in prod
-        up["ghl_access_token_set"] = bool(payload.ghl_access_token)
+        up["ghl_access_token_set"] = bool(payload.ghl_access_token.strip())
+        unset["ghl_access_token_encrypted"] = ""
+        unset["ghl_access_token"] = ""
+    if payload.twilio_account_sid is not None:
+        up["twilio_account_sid_set"] = bool(payload.twilio_account_sid.strip())
+        unset["twilio_account_sid"] = ""
+    if payload.twilio_auth_token is not None:
+        up["twilio_auth_token_set"] = bool(payload.twilio_auth_token.strip())
+        unset["twilio_auth_token"] = ""
     if payload.twilio_from_number is not None:
         up["twilio_from_number"] = payload.twilio_from_number
-        up["twilio_configured"] = bool(payload.twilio_from_number and payload.twilio_account_sid)
-    if up:
-        await db.users.update_one({"user_id": user.user_id}, {"$set": up})
+    # Live-send flag is env-backed, not inferred from dropped form secrets.
+    up["twilio_configured"] = bool(_twilio_client())
+    update_doc: dict = {"$set": up}
+    if unset:
+        update_doc["$unset"] = unset
+    await db.users.update_one({"user_id": user.user_id}, update_doc)
     doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    doc["twilio_configured"] = bool(_twilio_client())
     return User(**doc)
 
 # ---------------- Uploads ----------------
@@ -1132,7 +1164,11 @@ async def on_startup():
         await db.user_sessions.create_index("session_token", unique=True)
         await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
         await db.ghl_events.create_index("event_id", unique=True)
+        await db.twilio_inbound_sids.create_index("message_sid", unique=True)
     except Exception as e: logger.warning(f"index create: {e}")
+    if env_truthy("SKIP_BACKGROUND_JOBS"):
+        logger.info("Skipping object storage + scheduler (SKIP_BACKGROUND_JOBS)")
+        return
     try:
         await run_in_threadpool(_init_storage_sync); logger.info("Object storage initialized")
     except Exception as e: logger.warning(f"object storage: {e}")

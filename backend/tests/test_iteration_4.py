@@ -1,4 +1,10 @@
-"""Iteration 4 backend tests - Office dashboard pivot (GHL/Twilio webhooks, team, calls, digest, briefing)."""
+"""Iteration 4 backend tests - Office dashboard pivot (GHL/Twilio webhooks, team, calls, digest, briefing).
+
+Preview backends that run these unsigned webhook + demo-login checks need:
+  ALLOW_DEV_LOGIN=1
+  TWILIO_SKIP_SIGNATURE_CHECK=1
+(when TWILIO_AUTH_TOKEN / GHL_PUBLIC_KEY are configured). Production must leave those unset.
+"""
 import os, requests, pytest
 
 BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "").rstrip("/") or \

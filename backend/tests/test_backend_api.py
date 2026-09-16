@@ -1,4 +1,7 @@
-"""Backend API tests for SubSidekick foreman app."""
+"""Backend API tests for SubSidekick foreman app.
+
+Requires ALLOW_DEV_LOGIN=1 on the target backend (demo login is off by default).
+"""
 import os
 import time
 import pytest
