@@ -22,6 +22,7 @@ from webhook_security import (
     twilio_signature_required,
     verify_twilio_signature,
 )
+import ghl_sms
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -32,34 +33,56 @@ db = client[os.environ['DB_NAME']]
 
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
-# --- Twilio ---
+# --- Twilio / GHL SMS (env is source of truth; no secrets persisted) ---
+# Module-level snapshots for older tests; live reads go through ghl_sms helpers.
 TWILIO_SID = os.environ.get('TWILIO_ACCOUNT_SID', '').strip()
 TWILIO_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '').strip()
-TWILIO_FROM = os.environ.get('TWILIO_FROM_NUMBER', '').strip()
+TWILIO_FROM = os.environ.get('TWILIO_FROM_NUMBER', '').strip() or os.environ.get('TWILIO_FROM', '').strip()
+GHL_ACCESS_TOKEN = os.environ.get('GHL_ACCESS_TOKEN', '').strip()
+GHL_LOCATION_ID = os.environ.get('GHL_LOCATION_ID', '').strip()
+GHL_PUBLIC_KEY_PEM = os.environ.get('GHL_PUBLIC_KEY', '').strip()
+
+def _sms_from_number() -> str:
+    return ghl_sms.sms_from_number()
+
+def _twilio_configured() -> bool:
+    return ghl_sms.twilio_configured()
+
+def _ghl_configured() -> bool:
+    return ghl_sms.ghl_configured()
+
+def _sms_provider() -> Optional[str]:
+    return ghl_sms.sms_provider()
 
 def _twilio_client():
-    if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM):
+    sid = ghl_sms.twilio_account_sid()
+    token = ghl_sms.twilio_auth_token()
+    if not (sid and token):
         return None
     try:
         from twilio.rest import Client
-        return Client(TWILIO_SID, TWILIO_TOKEN)
+        return Client(sid, token)
     except Exception:
         return None
 
 def _send_sms_sync(to: str, body: str) -> dict:
-    c = _twilio_client()
-    if not c:
-        return {"provider": "outbox", "to": to, "body": body}
-    try:
-        m = c.messages.create(from_=TWILIO_FROM, to=to, body=body)
-        return {"provider": "twilio", "sid": m.sid, "to": to, "body": body}
-    except Exception as e:
-        return {"provider": "outbox", "to": to, "body": body, "error": str(e)}
+    """Prefer Twilio when SID+Auth Token exist; otherwise GHL Conversations; else outbox.
 
-# --- GHL ---
-GHL_ACCESS_TOKEN = os.environ.get('GHL_ACCESS_TOKEN', '').strip()
-GHL_LOCATION_ID = os.environ.get('GHL_LOCATION_ID', '').strip()
-GHL_PUBLIC_KEY_PEM = os.environ.get('GHL_PUBLIC_KEY', '').strip()
+    Never auto-sends change orders or invoices — callers only pass briefing/recovery/chat text.
+    """
+    c = _twilio_client()
+    if c:
+        try:
+            m = c.messages.create(from_=_sms_from_number(), to=to, body=body)
+            return {"provider": "twilio", "sid": m.sid, "to": to, "body": body}
+        except Exception as e:
+            return {"provider": "outbox", "to": to, "body": body, "error": str(e)}
+    if ghl_sms.ghl_sms_ready():
+        try:
+            return ghl_sms.send_sms(to, body, from_number=_sms_from_number())
+        except Exception as e:
+            return {"provider": "outbox", "to": to, "body": body, "error": str(e)}
+    return {"provider": "outbox", "to": to, "body": body}
 
 # --- Emergent Object Storage ---
 STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
@@ -651,12 +674,19 @@ async def trigger_briefing(tm_id: str, user: User = Depends(get_current_user)):
     result = await run_in_threadpool(_send_sms_sync, tm["phone_number"], body)
     call = CallLog(
         user_id=user.user_id, direction="outbound", channel="sms",
-        from_number=TWILIO_FROM or "office", to_number=tm["phone_number"],
+        from_number=_sms_from_number() or "office", to_number=tm["phone_number"],
         team_member_id=tm_id, team_member_name=tm["name"],
         summary=f"Morning briefing SMS ({result.get('provider')})", transcript=text,
     )
     await db.call_logs.insert_one(call.model_dump())
-    return {"delivered_via": result.get("provider"), "twilio_configured": bool(_twilio_client()), "call_id": call.id, "body": body}
+    return {
+        "delivered_via": result.get("provider"),
+        "twilio_configured": _twilio_configured(),
+        "ghl_configured": _ghl_configured(),
+        "sms_provider": _sms_provider(),
+        "call_id": call.id,
+        "body": body,
+    }
 
 # ---------------- Digest (Office view) ----------------
 @api_router.get("/digest")
@@ -827,6 +857,43 @@ async def _chat_with_context(user_id: str, content: str, channel: str = "chat", 
 async def chat_send(payload: ChatSendRequest, user: User = Depends(get_current_user)):
     return await _chat_with_context(user.user_id, payload.content, channel="chat")
 
+UNKNOWN_SMS_SENDER_REPLY = "This number isn't set up yet. Ask your office admin to add you to SubSidekick."
+
+async def _find_active_team_member(from_number: str) -> Optional[dict]:
+    if not from_number:
+        return None
+    tm = await db.team_members.find_one({"phone_number": from_number, "active": True}, {"_id": 0})
+    if tm:
+        return tm
+    members = await db.team_members.find({"active": True}, {"_id": 0}).to_list(500)
+    for m in members:
+        if ghl_sms.phones_match(m.get("phone_number"), from_number):
+            return m
+    return None
+
+async def _ingest_inbound_sms(from_number: str, body: str, to_number: str) -> dict:
+    """Shared chat/draft path for Twilio form webhooks and GHL InboundMessage JSON."""
+    tm = await _find_active_team_member(from_number)
+    if not tm:
+        return {"ok": True, "skipped": "unknown_sender", "reply": UNKNOWN_SMS_SENDER_REPLY}
+    result = await _chat_with_context(tm["user_id"], body, channel="sms", from_number=from_number)
+    extracted_ids = result.get("extracted_drafts") or []
+    call = CallLog(
+        user_id=tm["user_id"], direction="inbound", channel="sms",
+        from_number=from_number, to_number=to_number,
+        team_member_id=tm["id"], team_member_name=tm["name"],
+        transcript=body, summary=(result["ai_message"]["content"][:200]),
+        extracted_drafts=extracted_ids,
+    )
+    await db.call_logs.insert_one(call.model_dump())
+    return {
+        "ok": True,
+        "reply": result["ai_message"]["content"],
+        "extracted_drafts": extracted_ids,
+        "call_id": call.id,
+        "team_member_id": tm["id"],
+    }
+
 # ---------------- Twilio SMS Webhook (inbound) ----------------
 @api_router.post("/webhooks/twilio/sms")
 async def twilio_sms_inbound(request: Request):
@@ -849,25 +916,8 @@ async def twilio_sms_inbound(request: Request):
             )
         except DuplicateKeyError:
             return Response(content=render_sms_twiml(""), media_type="application/xml")
-    # Route to the team member's owner
-    tm = await db.team_members.find_one({"phone_number": from_number, "active": True}, {"_id": 0})
-    if not tm:
-        return Response(
-            content=render_sms_twiml("This number isn't set up yet. Ask your office admin to add you to SubSidekick."),
-            media_type="application/xml",
-        )
-    result = await _chat_with_context(tm["user_id"], body, channel="sms", from_number=from_number)
-    extracted_ids = result.get("extracted_drafts") or []
-    # Log the exchange as a CallLog (sms channel), including draft IDs (GHL parity)
-    call = CallLog(
-        user_id=tm["user_id"], direction="inbound", channel="sms",
-        from_number=from_number, to_number=to_number,
-        team_member_id=tm["id"], team_member_name=tm["name"],
-        transcript=body, summary=(result["ai_message"]["content"][:200]),
-        extracted_drafts=extracted_ids,
-    )
-    await db.call_logs.insert_one(call.model_dump())
-    return Response(content=render_sms_twiml(result["ai_message"]["content"]), media_type="application/xml")
+    ingested = await _ingest_inbound_sms(from_number, body, to_number)
+    return Response(content=render_sms_twiml(ingested.get("reply") or ""), media_type="application/xml")
 
 # ---------------- GHL Webhook (Voice AI) ----------------
 @api_router.post("/webhooks/ghl/voice-ai")
@@ -950,6 +1000,51 @@ async def ghl_voice_webhook(request: Request):
     await db.ghl_events.insert_one({"event_id": call_id, "received_at": utcnow(), "verified": verified})
     return {"ok": True, "call_id": call.id, "drafts_created": created_ids, "signature_verified": verified}
 
+# ---------------- GHL InboundMessage (SMS into LeadConnector number) ----------------
+@api_router.post("/webhooks/ghl/inbound-sms")
+async def ghl_inbound_sms(request: Request):
+    """JSON InboundMessage webhook from GHL Conversations.
+
+    Point a GHL InboundMessage (SMS) webhook at this URL so texts into the LC
+    number (+12295857126) feed the same chat/draft path as Twilio SMS.
+    Does not consume Twilio's form-encoded /webhooks/twilio/sms.
+    """
+    raw = await request.body()
+    sig = request.headers.get("x-ghl-signature") or request.headers.get("X-GHL-Signature")
+    enforced, verified = ghl_signature_ok(raw, sig)
+    if enforced and not verified:
+        raise HTTPException(status_code=401, detail="Invalid GHL signature")
+    try:
+        payload = json.loads(raw or b"{}")
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    parsed = ghl_sms.parse_inbound_payload(payload)
+    if not parsed:
+        return {"ok": True, "skipped": "not_inbound_sms", "signature_verified": verified}
+    message_id = parsed.get("message_id")
+    if message_id:
+        event_id = f"inbound-sms:{message_id}"
+        try:
+            await db.ghl_events.insert_one(
+                {"event_id": event_id, "received_at": utcnow(), "verified": verified, "kind": "inbound_sms"}
+            )
+        except DuplicateKeyError:
+            return {"ok": True, "duplicate": True, "signature_verified": verified}
+    ingested = await _ingest_inbound_sms(parsed["from_number"], parsed["body"], parsed["to_number"] or _sms_from_number())
+    reply_result = None
+    reply_text = ingested.get("reply")
+    if reply_text and not ingested.get("skipped"):
+        # Mirror Twilio TwiML reply so the super gets SubSidekick's confirmation over LC SMS.
+        reply_result = await run_in_threadpool(_send_sms_sync, parsed["from_number"], reply_text)
+    return {
+        "ok": True,
+        "skipped": ingested.get("skipped"),
+        "call_id": ingested.get("call_id"),
+        "drafts_created": ingested.get("extracted_drafts") or [],
+        "signature_verified": verified,
+        "reply_via": (reply_result or {}).get("provider"),
+    }
+
 # ---------------- Settings ----------------
 @api_router.patch("/settings", response_model=User)
 async def update_settings(payload: SettingsUpdate, user: User = Depends(get_current_user)):
@@ -977,13 +1072,13 @@ async def update_settings(payload: SettingsUpdate, user: User = Depends(get_curr
     if payload.twilio_from_number is not None:
         up["twilio_from_number"] = payload.twilio_from_number
     # Live-send flag is env-backed, not inferred from dropped form secrets.
-    up["twilio_configured"] = bool(_twilio_client())
+    up["twilio_configured"] = _twilio_configured()
     update_doc: dict = {"$set": up}
     if unset:
         update_doc["$unset"] = unset
     await db.users.update_one({"user_id": user.user_id}, update_doc)
     doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
-    doc["twilio_configured"] = bool(_twilio_client())
+    doc["twilio_configured"] = _twilio_configured()
     return User(**doc)
 
 # ---------------- Uploads ----------------
@@ -1062,8 +1157,15 @@ async def recovery_send(user: User = Depends(get_current_user)):
         "provider": result.get("provider"), "sid": result.get("sid"), "error": result.get("error"),
         "created_at": utcnow(), "trigger": "manual",
     })
-    return {"delivered_via": result.get("provider"), "body": body, "phone": user.phone_number,
-            "sid": result.get("sid"), "twilio_configured": bool(_twilio_client())}
+    return {
+        "delivered_via": result.get("provider"),
+        "body": body,
+        "phone": user.phone_number,
+        "sid": result.get("sid"),
+        "twilio_configured": _twilio_configured(),
+        "ghl_configured": _ghl_configured(),
+        "sms_provider": _sms_provider(),
+    }
 
 async def _run_weekly_recovery_for_all():
     async for u in db.users.find({"sms_opt_in": True, "phone_number": {"$ne": None}}, {"_id": 0}):
@@ -1146,8 +1248,16 @@ async def checkin_answer(payload: CheckinAnswerRequest, user: User = Depends(get
 # ---------------- Root ----------------
 @api_router.get("/")
 async def root():
-    return {"service": "subsidekick", "status": "ok", "twilio_from": TWILIO_FROM or None,
-            "twilio_configured": bool(_twilio_client()), "ghl_configured": bool(GHL_ACCESS_TOKEN)}
+    provider = _sms_provider()
+    return {
+        "service": "subsidekick",
+        "status": "ok",
+        "twilio_from": _sms_from_number() or None,
+        "twilio_configured": _twilio_configured(),
+        "ghl_configured": _ghl_configured(),
+        "sms_provider": provider,
+        "sms_ready": provider is not None,
+    }
 
 app.include_router(api_router)
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])

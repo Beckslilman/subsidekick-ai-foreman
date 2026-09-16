@@ -7,7 +7,9 @@ Voice-first AI foreman for small subcontractors. Field supers **call or text** t
 
 ## Integrations
 - **GHL Voice AI** — runs the phone conversation, sends post-call webhook to `/api/webhooks/ghl/voice-ai` with transcript + structured extraction (change orders, back charges, schedule changes). Ed25519 signature verified when `GHL_PUBLIC_KEY` is set. Idempotent by `callId`.
-- **Twilio Voice + SMS** — hotline number **+1 (229) 585-7126**. Inbound SMS lands at `/api/webhooks/twilio/sms`, gets AI reply (GPT-5.4-mini) with full conversation history, returns TwiML, logs a `CallLog`, and auto-drafts change orders / back charges / schedule changes when detected.
+- **Outbound SMS** — prefer Twilio when `TWILIO_ACCOUNT_SID` + `TWILIO_AUTH_TOKEN` are set; otherwise send via HighLevel Conversations (`POST /conversations/messages`) using `GHL_ACCESS_TOKEN` + `GHL_LOCATION_ID`. From number: `TWILIO_FROM` / `TWILIO_FROM_NUMBER`, default **+12295857126** (Trey's LC / Sidekick number). Status reports `sms_provider`: `twilio` | `ghl` | `null`.
+- **Twilio Voice + SMS** — optional native Twilio. Inbound SMS lands at `/api/webhooks/twilio/sms` (form-encoded), AI reply as TwiML, CallLog + draft extraction.
+- **GHL InboundMessage SMS** — optional `POST /api/webhooks/ghl/inbound-sms` so texts into the LC number feed the same chat/draft path (JSON; does not replace the Twilio form webhook).
 - **OpenAI (via Emergent LLM key)** — GPT-5.4-mini for chat + morning briefing + EOD summary; Whisper for STT; TTS-1 for TTS.
 - **Emergent Object Storage** — jobsite photos.
 - **APScheduler** — Weekly Recovery SMS every Monday 8 AM UTC.
@@ -29,7 +31,8 @@ Voice-first AI foreman for small subcontractors. Field supers **call or text** t
 ## Env
 Backend Deployment Secrets (process env — **source of truth** for live Twilio/GHL; Settings UI does not store SID/token):
 - `EMERGENT_LLM_KEY`, `MONGO_URL`, `DB_NAME`
-- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER="+12295857126"`
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` (optional — if missing, SMS uses GHL Conversations)
+- `TWILIO_FROM` or `TWILIO_FROM_NUMBER` (default `+12295857126`)
 - `GHL_ACCESS_TOKEN`, `GHL_LOCATION_ID`, `GHL_PUBLIC_KEY`
 - Production: Twilio signatures are required when `TWILIO_AUTH_TOKEN` is set (and fail-closed in production even if it is missing). Preview tests may set `TWILIO_SKIP_SIGNATURE_CHECK=1`.
 - When `GHL_PUBLIC_KEY` is set, unsigned/invalid GHL webhooks are rejected.

@@ -55,14 +55,24 @@ export default function SettingsScreen() {
   async function sendNow() {
     setSending(true); setFlash(null);
     try {
-      const r = await apiPost<{ twilio_configured: boolean }>("/recovery/send", {});
-      setFlash(r.twilio_configured ? `Text sent to ${phone}.` : `Preview logged to outbox (set TWILIO_* Deployment Secrets to send live).`);
+      const r = await apiPost<{ twilio_configured: boolean; delivered_via?: string; sms_provider?: string | null }>("/recovery/send", {});
+      const sent = r.delivered_via && r.delivered_via !== "outbox";
+      setFlash(sent
+        ? `Text sent to ${phone} via ${r.delivered_via}.`
+        : "Preview logged to outbox (set GHL_ACCESS_TOKEN + GHL_LOCATION_ID, or TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN, to send live).");
     } catch (e: any) { setFlash(e?.message?.includes("400") ? "Add a phone number first." : "Send failed."); }
     finally { setSending(false); }
   }
 
   const webhookUrl = `${process.env.EXPO_PUBLIC_BACKEND_URL}/api/webhooks/ghl/voice-ai`;
   const smsWebhook = `${process.env.EXPO_PUBLIC_BACKEND_URL}/api/webhooks/twilio/sms`;
+  const ghlInboundSms = `${process.env.EXPO_PUBLIC_BACKEND_URL}/api/webhooks/ghl/inbound-sms`;
+  const smsProvider = backendStatus.data?.sms_provider as string | null | undefined;
+  const smsHint = smsProvider === "ghl"
+    ? "GHL Conversations (LeadConnector numbers — no Twilio SID needed)"
+    : smsProvider === "twilio"
+      ? "Twilio Account SID + Auth Token"
+      : "Needs GHL_ACCESS_TOKEN + GHL_LOCATION_ID, or TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN";
 
   return (
     <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1, backgroundColor: colors.surface }}>
@@ -78,7 +88,8 @@ export default function SettingsScreen() {
         {/* Setup / Status */}
         <Card style={{ backgroundColor: colors.surfaceInverse, borderColor: colors.brandPrimary }}>
           <Text style={{ color: colors.brandPrimary, fontSize: 11, fontWeight: "900", letterSpacing: 2 }}>INTEGRATIONS STATUS</Text>
-          <StatusRow label="Twilio SMS/Voice" ok={!!backendStatus.data?.twilio_configured} hint="AI hotline + weekly recovery texts" />
+          <StatusRow label="Outbound SMS" ok={!!smsProvider} hint={smsHint} />
+          <StatusRow label="Twilio SMS/Voice" ok={!!backendStatus.data?.twilio_configured} hint="Optional — used when Account SID + Auth Token are set" />
           <StatusRow label="GHL Voice AI" ok={!!backendStatus.data?.ghl_configured} hint="Voice AI on inbound/outbound calls" />
         </Card>
 
@@ -115,8 +126,9 @@ export default function SettingsScreen() {
           </Text>
           <Text style={{ color: colors.onSurface, fontSize: 13, lineHeight: 20 }}>
             Set these on the backend / host:{'\n'}
-            <Text style={{ fontWeight: "900" }}>TWILIO_ACCOUNT_SID</Text>, <Text style={{ fontWeight: "900" }}>TWILIO_AUTH_TOKEN</Text>, <Text style={{ fontWeight: "900" }}>TWILIO_FROM_NUMBER</Text>{'\n'}
-            <Text style={{ fontWeight: "900" }}>GHL_ACCESS_TOKEN</Text>, <Text style={{ fontWeight: "900" }}>GHL_LOCATION_ID</Text>, <Text style={{ fontWeight: "900" }}>GHL_PUBLIC_KEY</Text>{'\n'}
+            LeadConnector SMS (no Twilio console): <Text style={{ fontWeight: "900" }}>GHL_ACCESS_TOKEN</Text>, <Text style={{ fontWeight: "900" }}>GHL_LOCATION_ID</Text>, optional <Text style={{ fontWeight: "900" }}>TWILIO_FROM</Text> / <Text style={{ fontWeight: "900" }}>TWILIO_FROM_NUMBER</Text> (defaults to +12295857126).{'\n'}
+            Optional native Twilio: <Text style={{ fontWeight: "900" }}>TWILIO_ACCOUNT_SID</Text>, <Text style={{ fontWeight: "900" }}>TWILIO_AUTH_TOKEN</Text>{'\n'}
+            Voice AI signatures: <Text style={{ fontWeight: "900" }}>GHL_PUBLIC_KEY</Text>{'\n'}
             Optional preview bypasses (never in production): <Text style={{ fontWeight: "900" }}>TWILIO_SKIP_SIGNATURE_CHECK=1</Text>, <Text style={{ fontWeight: "900" }}>ALLOW_DEV_LOGIN=1</Text>
           </Text>
         </Card>
@@ -149,8 +161,10 @@ export default function SettingsScreen() {
           </Text>
           <Mono>{webhookUrl}</Mono>
           <Text style={{ color: colors.onSurface, fontSize: 14, marginTop: spacing.sm }}>
-            <Text style={{ fontWeight: "900" }}>4.</Text> Configure the Voice AI agent to extract change_orders, back_charges, and schedule_changes and include them in the webhook payload. Set <Text style={{ fontWeight: "900" }}>GHL_PUBLIC_KEY</Text> so unsigned webhooks are rejected.
+            <Text style={{ fontWeight: "900" }}>4.</Text> Configure the Voice AI agent to extract change_orders, back_charges, and schedule_changes and include them in the webhook payload. Set <Text style={{ fontWeight: "900" }}>GHL_PUBLIC_KEY</Text> so unsigned webhooks are rejected.{'\n'}
+            <Text style={{ fontWeight: "900" }}>5.</Text> Optional — for texts into the LC number, add a GHL <Text style={{ fontWeight: "900" }}>InboundMessage</Text> webhook:
           </Text>
+          <Mono>{ghlInboundSms}</Mono>
           <View style={{ height: spacing.sm }} />
           <Field label="GHL Location ID (not the access token)">
             <TextInput value={ghlLocation} onChangeText={setGhlLocation} placeholder="Loc-abc123" placeholderTextColor={colors.muted} style={inputStyle(colors)} testID="ghl-location" />

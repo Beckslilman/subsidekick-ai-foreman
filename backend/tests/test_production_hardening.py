@@ -351,3 +351,209 @@ def test_settings_does_not_persist_twilio_secrets(client, fake_db, monkeypatch):
     assert "secret-token-value" not in str(user)
     assert r.json()["ghl_access_token_set"] is True
     assert r.json()["ghl_location_id"] == "loc_xyz"
+
+
+def test_status_sms_provider_ghl_without_twilio(client, monkeypatch):
+    for key in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("GHL_ACCESS_TOKEN", "ghl_preview_token")
+    monkeypatch.setenv("GHL_LOCATION_ID", "loc_preview")
+    r = client.get("/api/")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["twilio_configured"] is False
+    assert body["ghl_configured"] is True
+    assert body["sms_provider"] == "ghl"
+    assert body["sms_ready"] is True
+    assert body["twilio_from"] == "+12295857126"
+
+
+def test_status_sms_provider_twilio_wins(client, monkeypatch):
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACxxxxxxxx")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "twilio_token")
+    monkeypatch.setenv("GHL_ACCESS_TOKEN", "ghl_preview_token")
+    monkeypatch.setenv("GHL_LOCATION_ID", "loc_preview")
+    r = client.get("/api/")
+    body = r.json()
+    assert body["twilio_configured"] is True
+    assert body["ghl_configured"] is True
+    assert body["sms_provider"] == "twilio"
+
+
+def test_send_sms_sync_uses_ghl_when_twilio_env_missing(monkeypatch):
+    monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("GHL_ACCESS_TOKEN", "ghl_preview_token")
+    monkeypatch.setenv("GHL_LOCATION_ID", "loc_preview")
+
+    def fake_send(to, message, **kwargs):
+        return {"provider": "ghl", "sid": "msg_mocked", "to": to, "body": message, "contact_id": "ct1"}
+
+    monkeypatch.setattr(server.ghl_sms, "send_sms", fake_send)
+    result = server._send_sms_sync("+19045550101", "Morning briefing")
+    assert result["provider"] == "ghl"
+    assert result["sid"] == "msg_mocked"
+
+
+def test_send_sms_sync_twilio_path_not_ghl(monkeypatch):
+    class _Msg:
+        sid = "SM_twilio_path"
+
+    class _Messages:
+        def create(self, from_, to, body):
+            assert from_ == "+12295857126"
+            assert to == "+19045550101"
+            return _Msg()
+
+    class _Client:
+        messages = _Messages()
+
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACxxxxxxxx")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "twilio_token")
+    monkeypatch.setenv("GHL_ACCESS_TOKEN", "ghl_preview_token")
+    monkeypatch.setenv("GHL_LOCATION_ID", "loc_preview")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("GHL must not be used when Twilio SID+token are set")
+
+    monkeypatch.setattr(server, "_twilio_client", lambda: _Client())
+    monkeypatch.setattr(server.ghl_sms, "send_sms", boom)
+    result = server._send_sms_sync("+19045550101", "hello")
+    assert result["provider"] == "twilio"
+    assert result["sid"] == "SM_twilio_path"
+
+
+def test_send_sms_sync_outbox_when_neither_configured(monkeypatch):
+    monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("GHL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("GHL_LOCATION_ID", raising=False)
+    result = server._send_sms_sync("+19045550101", "hello")
+    assert result["provider"] == "outbox"
+
+
+def test_ghl_inbound_sms_creates_draft_and_does_not_use_twiml(client, known_super, monkeypatch):
+    monkeypatch.setattr(server, "_send_sms_sync", lambda to, body: {"provider": "ghl", "sid": "m1", "to": to, "body": body})
+    r = client.post(
+        "/api/webhooks/ghl/inbound-sms",
+        json={
+            "type": "InboundMessage",
+            "locationId": "loc_xyz",
+            "body": "GC added extra work on east wall change order",
+            "contactId": "ct_rick",
+            "messageId": "ghl-sms-1",
+            "direction": "inbound",
+            "messageType": "SMS",
+            "from": "+19045550101",
+            "to": "+12295857126",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert "<?xml" not in r.text
+    assert len(server.db.change_orders.docs) == 1
+    assert server.db.change_orders.docs[0]["status"] == "draft"
+    assert body["drafts_created"] == [server.db.change_orders.docs[0]["id"]]
+    log = server.db.call_logs.docs[0]
+    assert log["channel"] == "sms"
+    assert log["direction"] == "inbound"
+    assert log["extracted_drafts"] == body["drafts_created"]
+    assert body["reply_via"] == "ghl"
+
+
+def test_ghl_inbound_sms_dedupe_by_message_id(client, known_super, monkeypatch):
+    monkeypatch.setattr(server, "_send_sms_sync", lambda *a, **k: {"provider": "ghl"})
+    payload = {
+        "type": "InboundMessage",
+        "body": "GC added extra work change order",
+        "messageId": "ghl-sms-dup",
+        "direction": "inbound",
+        "messageType": "SMS",
+        "from": "+19045550101",
+        "to": "+12295857126",
+    }
+    r1 = client.post("/api/webhooks/ghl/inbound-sms", json=payload)
+    r2 = client.post("/api/webhooks/ghl/inbound-sms", json=payload)
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r2.json().get("duplicate") is True
+    assert len(server.db.call_logs.docs) == 1
+    assert len(server.db.change_orders.docs) == 1
+
+
+def test_ghl_inbound_sms_skips_call_and_outbound(client, known_super):
+    call = client.post(
+        "/api/webhooks/ghl/inbound-sms",
+        json={
+            "type": "InboundMessage",
+            "messageType": "CALL",
+            "from": "+19045550101",
+            "body": "voicemail",
+            "direction": "inbound",
+            "messageId": "call-1",
+        },
+    )
+    assert call.status_code == 200
+    assert call.json().get("skipped") == "not_inbound_sms"
+    outbound = client.post(
+        "/api/webhooks/ghl/inbound-sms",
+        json={
+            "type": "OutboundMessage",
+            "messageType": "SMS",
+            "from": "+12295857126",
+            "to": "+19045550101",
+            "body": "we texted you",
+            "direction": "outbound",
+            "messageId": "out-1",
+        },
+    )
+    assert outbound.json().get("skipped") == "not_inbound_sms"
+    assert server.db.call_logs.docs == []
+    assert server.db.change_orders.docs == []
+
+
+def test_ghl_inbound_sms_unsigned_rejected_when_key_set(client, monkeypatch):
+    private = Ed25519PrivateKey.generate()
+    pem = private.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+    monkeypatch.setenv("GHL_PUBLIC_KEY", pem)
+    r = client.post(
+        "/api/webhooks/ghl/inbound-sms",
+        json={"type": "InboundMessage", "messageType": "SMS", "from": "+19045550101", "body": "hi"},
+    )
+    assert r.status_code == 401
+    assert server.db.call_logs.docs == []
+
+
+def test_twilio_form_webhook_still_xml_after_ghl_inbound(client, known_super, monkeypatch):
+    """GHL JSON inbound must not change Twilio's form-encoded TwiML contract."""
+    monkeypatch.setenv("TWILIO_SKIP_SIGNATURE_CHECK", "1")
+    monkeypatch.setattr(server, "_chat_with_context", _fake_chat)
+    monkeypatch.setattr(server, "_send_sms_sync", lambda *a, **k: {"provider": "outbox"})
+    r = client.post(
+        SMS_PATH,
+        data={
+            "From": "+19045550101",
+            "Body": "GC added extra work change order",
+            "To": "+12295857126",
+            "MessageSid": "SM-still-form",
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/xml")
+    assert "<?xml" in r.text and "<Response>" in r.text
+    json_r = client.post(
+        "/api/webhooks/ghl/inbound-sms",
+        json={
+            "type": "InboundMessage",
+            "messageType": "SMS",
+            "from": "+19045550101",
+            "to": "+12295857126",
+            "body": "hi from LC",
+            "messageId": "ghl-form-parity",
+        },
+    )
+    assert json_r.status_code == 200
+    assert json_r.headers["content-type"].startswith("application/json")
