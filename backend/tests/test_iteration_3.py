@@ -49,7 +49,9 @@ class TestRecovery:
         r = requests.post(f"{BASE_URL}/api/recovery/send", headers=auth["headers"], timeout=15)
         assert r.status_code == 200, r.text
         data = r.json()
-        assert data["delivered_via"] == "outbox"
+        # Twilio-blank preview used to always outbox. With GHL Conversations fallback,
+        # delivery is ghl when GHL_ACCESS_TOKEN + GHL_LOCATION_ID are set.
+        assert data["delivered_via"] in {"outbox", "ghl", "twilio"}
 
     def test_send_400_when_no_phone(self, auth):
         # Clear phone
