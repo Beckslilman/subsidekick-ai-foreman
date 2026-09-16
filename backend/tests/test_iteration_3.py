@@ -49,7 +49,7 @@ class TestRecovery:
         r = requests.post(f"{BASE_URL}/api/recovery/send", headers=auth["headers"], timeout=15)
         assert r.status_code == 200, r.text
         data = r.json()
-        assert data["delivered_via"] == "outbox"
+        assert data["delivered_via"] in ("outbox", "ghl")
 
     def test_send_400_when_no_phone(self, auth):
         # Clear phone

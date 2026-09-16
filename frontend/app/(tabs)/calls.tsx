@@ -41,7 +41,13 @@ export default function CallsScreen() {
     setTriggering(id); setFlash(null);
     try {
       const r = await apiPost<{ delivered_via: string; twilio_configured: boolean }>(`/team/${id}/trigger-briefing`, {});
-      setFlash(r.twilio_configured ? "Morning briefing SMS sent." : "Briefing logged to outbox (add Twilio keys in Settings to send live).");
+      if (r.delivered_via === "ghl") {
+        setFlash("Morning briefing SMS sent via GHL.");
+      } else if (r.delivered_via === "twilio") {
+        setFlash("Morning briefing SMS sent via Twilio.");
+      } else {
+        setFlash("Briefing logged to outbox (set GHL or Twilio Deployment Secrets to send live).");
+      }
       qc.invalidateQueries({ queryKey: ["calls"] });
     } catch (e) { setFlash("Trigger failed."); }
     finally { setTriggering(null); }

@@ -7,7 +7,8 @@ Voice-first AI foreman for small subcontractors. Field supers **call or text** t
 
 ## Integrations
 - **GHL Voice AI** — runs the phone conversation, sends post-call webhook to `/api/webhooks/ghl/voice-ai` with transcript + structured extraction (change orders, back charges, schedule changes). Ed25519 signature verified when `GHL_PUBLIC_KEY` is set. Idempotent by `callId`.
-- **Twilio Voice + SMS** — hotline number **+1 (229) 585-7126**. Inbound SMS lands at `/api/webhooks/twilio/sms`, gets AI reply (GPT-5.4-mini) with full conversation history, returns TwiML, logs a `CallLog`, and auto-drafts change orders / back charges / schedule changes when detected.
+- **GHL Conversations SMS** — when `TWILIO_ACCOUNT_SID` + `TWILIO_AUTH_TOKEN` are absent, outbound SMS (recovery, briefing, inbound replies) is sent via `POST https://services.leadconnectorhq.com/conversations/messages` using `GHL_ACCESS_TOKEN` + `GHL_LOCATION_ID`. From-number is `TWILIO_FROM_NUMBER` / `TWILIO_FROM` / `twilio_from_number`, default **+12295857126**. Inbound LC texts can POST JSON to `/api/webhooks/ghl/inbound-sms` (GHL InboundMessage / workflow).
+- **Twilio Voice + SMS** — preferred when SID+token are present. Inbound SMS lands at `/api/webhooks/twilio/sms` (form-encoded TwiML). Status reports `sms_provider`: `twilio` | `ghl` | `null`.
 - **OpenAI (via Emergent LLM key)** — GPT-5.4-mini for chat + morning briefing + EOD summary; Whisper for STT; TTS-1 for TTS.
 - **Emergent Object Storage** — jobsite photos.
 - **APScheduler** — Weekly Recovery SMS every Monday 8 AM UTC.
@@ -27,10 +28,14 @@ Voice-first AI foreman for small subcontractors. Field supers **call or text** t
 - CrewAssignments (dispatch board) · CheckinSessions · SmsOutbox · Uploads · GhlEvents
 
 ## Env
-Backend `.env`:
+Backend Deployment Secrets (process env — **source of truth** for live Twilio/GHL; Settings UI does not store SID/token):
 - `EMERGENT_LLM_KEY`, `MONGO_URL`, `DB_NAME`
-- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER="+12295857126"`
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` (or `TWILIO_FROM` / `twilio_from_number`; default `+12295857126`)
 - `GHL_ACCESS_TOKEN`, `GHL_LOCATION_ID`, `GHL_PUBLIC_KEY`
+- SMS: Twilio is used when SID+token are set; otherwise GHL Conversations if token+location are set. Status `GET /api/` reports `sms_provider`, `twilio_configured`, `ghl_configured`.
+- Production: Twilio signatures are required when `TWILIO_AUTH_TOKEN` is set (and fail-closed in production even if it is missing). Preview tests may set `TWILIO_SKIP_SIGNATURE_CHECK=1`.
+- When `GHL_PUBLIC_KEY` is set, unsigned/invalid GHL webhooks are rejected.
+- `ALLOW_DEV_LOGIN=1` required for `POST /api/auth/dev-login` (off by default).
 
 ## Design
 Brutalist industrial: black surfaces, Industrial Orange (#FF5A00), thick 2pt borders, no shadows, oversized numeric KPIs, tab bar with Digest/Inbox/Jobs/Calls.

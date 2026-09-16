@@ -1,4 +1,10 @@
-"""Iteration 4 backend tests - Office dashboard pivot (GHL/Twilio webhooks, team, calls, digest, briefing)."""
+"""Iteration 4 backend tests - Office dashboard pivot (GHL/Twilio webhooks, team, calls, digest, briefing).
+
+Preview backends that run these unsigned webhook + demo-login checks need:
+  ALLOW_DEV_LOGIN=1
+  TWILIO_SKIP_SIGNATURE_CHECK=1
+(when TWILIO_AUTH_TOKEN / GHL_PUBLIC_KEY are configured). Production must leave those unset.
+"""
 import os, requests, pytest
 
 BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "").rstrip("/") or \
@@ -112,11 +118,11 @@ def test_team_briefing_and_trigger(hdr):
     assert j["team_member_id"] == tm_id
     assert j["name"] and j["phone"] and j["briefing"]
 
-    # Trigger briefing - Twilio blank => outbox
+    # Trigger briefing - Twilio blank => outbox, or GHL Conversations if GHL_* env is set
     r = requests.post(f"{BASE}/api/team/{tm_id}/trigger-briefing", headers=hdr, timeout=60)
     assert r.status_code == 200
     payload = r.json()
-    assert payload["delivered_via"] == "outbox"
+    assert payload["delivered_via"] in ("outbox", "ghl")
     # New call log added
     r = requests.get(f"{BASE}/api/calls", headers=hdr, timeout=15)
     calls = r.json()
