@@ -118,11 +118,11 @@ def test_team_briefing_and_trigger(hdr):
     assert j["team_member_id"] == tm_id
     assert j["name"] and j["phone"] and j["briefing"]
 
-    # Trigger briefing - Twilio blank => outbox
+    # Trigger briefing - Twilio blank => outbox, or GHL Conversations if GHL_* env is set
     r = requests.post(f"{BASE}/api/team/{tm_id}/trigger-briefing", headers=hdr, timeout=60)
     assert r.status_code == 200
     payload = r.json()
-    assert payload["delivered_via"] == "outbox"
+    assert payload["delivered_via"] in ("outbox", "ghl")
     # New call log added
     r = requests.get(f"{BASE}/api/calls", headers=hdr, timeout=15)
     calls = r.json()

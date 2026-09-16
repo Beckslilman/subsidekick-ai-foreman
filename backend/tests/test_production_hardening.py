@@ -105,6 +105,7 @@ class FakeDB:
         self.call_logs = FakeCollection()
         self.twilio_inbound_sids = FakeCollection(unique_keys=("message_sid",))
         self.ghl_events = FakeCollection(unique_keys=("event_id",))
+        self.ghl_inbound_sids = FakeCollection(unique_keys=("message_id",))
         self.jobs = FakeCollection()
         self.change_orders = FakeCollection()
         self.back_charges = FakeCollection()
