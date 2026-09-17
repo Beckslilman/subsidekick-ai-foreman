@@ -1,5 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Request, Response, Query
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -23,13 +24,20 @@ from webhook_security import (
     verify_twilio_signature,
 )
 import ghl_sms
+from env_config import load_runtime_env, mongo_connect_args
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# Do not KeyError on missing Mongo — that class of boot crash is FUNCTION_INVOCATION_FAILED on Vercel.
+# Data routes stay Mongo-backed; Supabase env is fold-only until a later PR.
+_mongo = mongo_connect_args()
+if _mongo:
+    client = AsyncIOMotorClient(_mongo[0])
+    db = client[_mongo[1]]
+else:
+    client = None
+    db = None
 
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
@@ -1246,9 +1254,15 @@ async def checkin_answer(payload: CheckinAnswerRequest, user: User = Depends(get
     return result
 
 # ---------------- Root ----------------
+@api_router.get("/health")
+async def health():
+    """Boot-safe. Booleans only — never secret values. Supabase is not queried."""
+    return load_runtime_env().health()
+
 @api_router.get("/")
 async def root():
     provider = _sms_provider()
+    storage = load_runtime_env().health()["storage"]
     return {
         "service": "subsidekick",
         "status": "ok",
@@ -1257,9 +1271,31 @@ async def root():
         "ghl_configured": _ghl_configured(),
         "sms_provider": provider,
         "sms_ready": provider is not None,
+        "storage": storage,
     }
 
 app.include_router(api_router)
+
+@app.middleware("http")
+async def mongo_required_for_data_routes(request: Request, call_next):
+    """Keep /api/health up when Mongo env is missing. Do not change money draft-only rules."""
+    path = request.url.path
+    if (
+        path.rstrip("/") in ("/api", "/api/health")
+        or path.startswith("/docs")
+        or path.startswith("/redoc")
+        or path.startswith("/openapi")
+    ):
+        return await call_next(request)
+    if db is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "MONGO_URL and DB_NAME are required for data routes until the Supabase fold. See /api/health and docs/STACK.md.",
+            },
+        )
+    return await call_next(request)
+
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1268,6 +1304,9 @@ logger = logging.getLogger(__name__)
 _scheduler = None
 @app.on_event("startup")
 async def on_startup():
+    if db is None:
+        logger.warning("MONGO_URL/DB_NAME missing — /api/health only; data routes return 503")
+        return
     try:
         await db.users.create_index("email", unique=True)
         await db.users.create_index("user_id", unique=True)
@@ -1293,4 +1332,5 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    client.close()
+    if client is not None:
+        client.close()

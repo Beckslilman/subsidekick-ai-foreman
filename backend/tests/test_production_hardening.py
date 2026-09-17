@@ -366,6 +366,30 @@ def test_status_sms_provider_ghl_without_twilio(client, monkeypatch):
     assert body["sms_provider"] == "ghl"
     assert body["sms_ready"] is True
     assert body["twilio_from"] == "+12295857126"
+    assert body["storage"]["mongodb_configured"] is True
+    assert body["storage"]["supabase_used_by_api"] is False
+
+
+def test_health_reports_storage_booleans_only(client):
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["storage"]["mongodb_configured"] is True
+    assert body["storage"]["supabase_used_by_api"] is False
+    dumped = str(body).lower()
+    assert "mongodb://" not in dumped
+    assert "service_role" not in dumped
+
+
+def test_data_routes_503_when_mongo_unconfigured(client, monkeypatch):
+    monkeypatch.setattr(server, "db", None)
+    jobs = client.get("/api/jobs")
+    assert jobs.status_code == 503
+    health = client.get("/api/health")
+    assert health.status_code == 200
+    root = client.get("/api/")
+    assert root.status_code == 200
 
 
 def test_status_sms_provider_twilio_wins(client, monkeypatch):
