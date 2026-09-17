@@ -1,5 +1,7 @@
 # SubSidekick — Product Requirements
 
+> Product source of truth is now [PRODUCT.md](../PRODUCT.md). This file is historical office-dashboard notes and must not override that lock.
+
 ## Vision (v4 pivot)
 Voice-first AI foreman for small subcontractors. Field supers **call or text** the 24/7 AI hotline **+1 (229) 585-7126** (or receive an outbound morning briefing call). The mobile app is the **Office Dashboard** — the office admin (owner/spouse/bookkeeper) reviews drafts, approves change orders, resolves back charges, confirms schedule changes, and manages the team.
 
